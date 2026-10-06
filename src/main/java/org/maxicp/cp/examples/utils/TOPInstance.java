@@ -18,6 +18,9 @@ public class TOPInstance {
     public int[] profit;
     public int scaling;
 
+    public int[] xCoord;
+    public int[] yCoord;
+
     public int maxTotalDistances;
     public int maxProfit;
 
@@ -37,8 +40,8 @@ public class TOPInstance {
         maxTotalDistances = 0;
         maxProfit = 0;
 
-        int[] xCoord = new int[nVert];
-        int[] yCoord = new int[nVert];
+        xCoord = new int[nVert];
+        yCoord = new int[nVert];
 
         profit = new int[nVert];
         distanceMatrix = new int[nVert][nVert];
