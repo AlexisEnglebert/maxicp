@@ -1,21 +1,18 @@
 package org.maxicp.cp.examples.raw;
 
-import org.maxicp.cp.engine.constraints.LessOrEqual;
-import org.maxicp.cp.engine.constraints.MulCte;
 import org.maxicp.cp.engine.constraints.Sum;
 import org.maxicp.cp.engine.constraints.seqvar.Distance;
 import org.maxicp.cp.engine.core.CPIntVar;
 import org.maxicp.cp.engine.core.CPSeqVar;
 import org.maxicp.cp.engine.core.CPSolver;
 import org.maxicp.cp.examples.utils.TOPInstance;
+import org.maxicp.cp.examples.utils.TopFormat;
 import org.maxicp.search.DFSearch;
 import org.maxicp.search.Objective;
+import org.maxicp.search.SearchStatistics;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Random;
+import java.io.File;
+import java.util.*;
 
 import static org.maxicp.cp.CPFactory.*;
 import static org.maxicp.modeling.algebra.sequence.SeqStatus.*;
@@ -23,77 +20,90 @@ import static org.maxicp.search.Searches.*;
 
 public class TOPSeqVar {
 
-    public static final int  MIN_CUSTOMER_DESTROYED = 1;
+    // number of destroyed customers, in % of the customers (Chaigneau et al. 2025, Table 2)
+    public static final int MIN_CUSTOMER_DESTROYED = 1;
     public static final int MAX_CUSTOMER_DESTROYED = 20;
 
     public static final int MIN_SEQ_CUSTOMER_DESTROYED = 1;
     public static final int MAX_SEQ_CUSTOMER_DESTROYED = 20;
 
-    public static final int LNS_RUNNING_TIME = 100*1000; // in ms
+    public static final int LNS_RUNNING_TIME = 95*1000; // in ms
+    public static final int PROOF_RUNNING_TIME = 5*1000; // in ms
 
     public static void main(String[] args) {
-        solveInstance("data/TOP/Chaos/p7.3.n.txt", 1000);
+        //solveInstance("data/TOP/gen3/m10/fnl4461_gen3_m10.txt", TopFormat.KUL,1000);
+        //solveInstance("data/TOP/gen3/m3/d1291_gen3_m3.txt", TopFormat.KUL,1000);
+        solveInstance("data/TOP/gen3/m3/u2319_gen3_m3.txt", TopFormat.KUL,1000);
+        //solveInstance("data/TOP/Chaos/p4.2.b.txt", TopFormat.KUL,1000);
+        //solveInstance("data/TOP/Chaos/p4.2.l.txt", TopFormat.KUL,1000);
+
+        // solve every Chaos instance, then print a summary
+        /*File[] files = new File("data/TOP/Chaos").listFiles();
+        Arrays.sort(files);
+        StringBuilder summary = new StringBuilder();
+        for (File file : files) {
+            try {
+                summary.append(file.getName()).append(": ").append(solveInstance(file.getPath(), TopFormat.KUL, 1000)).append("\n");
+            } catch (Exception e) {
+                System.out.println("Exception for : "+ file.getPath() +  " : " + e.getMessage());
+            }
+        }
+
+        System.out.println("===================== Summary =====================");
+        System.out.print(summary);*/
+
     }
-    public static void solveInstance(String instancePath, int scaling) {
-        TOPInstance instance = new TOPInstance(instancePath, scaling);
+
+    public static String solveInstance(String instancePath, TopFormat format, int scaling) {
+        TOPInstance instance = new TOPInstance(instancePath, format, scaling);
+        System.out.println("running : " +  instancePath);
+
+        // no vehicle can go from the start depot to the end depot: no route is possible, the best profit is 0
+        if (instance.distanceMatrix[0][instance.nVert-1] > instance.maxTime) {
+            return "0 (optimal)";
+        }
 
         // ===================== Decision variables =====================
         CPSolver solver = makeSolver();
-        CPIntVar maxTime = makeIntVar(solver, instance.maxTime+1);
         CPSeqVar[] routes = new CPSeqVar[instance.nPath]; // All the routes (one for each vehicle)
-        CPIntVar[] distance = new CPIntVar[instance.nPath]; // Store the total distance of a route.
-        CPIntVar unit = makeIntVar(solver, 2);
-        CPIntVar totalProfit = makeIntVar(solver, instance.maxProfit);
-        CPIntVar[][] routeNodeProfit = new CPIntVar[instance.nPath][instance.nVert];
-        CPIntVar[] perRouteProfit = new CPIntVar[instance.nPath];
+        CPIntVar[] distance = makeIntVarArray(solver, instance.nPath, 0, instance.maxTime); // Store the total distance of a route.
+        CPIntVar totalProfit = makeIntVar(solver, 0, instance.maxProfit);
 
-        unit.fix(1);
-
-        for(int i = 0; i < instance.nPath; i++) {
+        for (int i = 0; i < instance.nPath; i++) {
             routes[i] = makeSeqVar(solver, instance.nVert, 0, instance.nVert-1);
-            distance[i] = makeIntVar(solver, instance.maxTotalDistances);
-            System.out.println(routes[i]);
         }
 
         // ===================== Constrains =====================
-        System.out.println(instance);
-        maxTime.fix(instance.maxTime);
-
-        // Each route must be <= than maxTime.
         for(int i = 0; i < instance.nPath; i++) {
-            solver.post(new Distance(routes[i], instance.distanceMatrix, distance[i])); // Lui doit faire partis des troubleurs mais c'est le timide.
-            solver.post(new LessOrEqual(distance[i], maxTime));
+            solver.post(new Distance(routes[i], instance.distanceMatrix, distance[i], false)); // triangular inequality holds by construction
         }
 
         // A node can be visited once or none across all routes except for node 0 and node n-1
         for (int node = 1; node < instance.nVert-1; node++) {
             CPIntVar[] visits = new CPIntVar[instance.nPath];
-            CPIntVar TotalVisit = makeIntVar(solver, instance.nVert);
             for (int route = 0; route < instance.nPath; route++) {
                 visits[route] = routes[route].getNodeVar(node).isRequired();
-
             }
-            solver.post(new Sum(visits, TotalVisit));
-            solver.post(new LessOrEqual(TotalVisit, unit));
+            solver.post(new Sum(visits, makeIntVar(solver, 0, 1)));
         }
 
-        // Bind the profit to per route profit
+        // Total profit: profit of each customer (depots excluded) visited by a route
+        CPIntVar[] nodeProfit = new CPIntVar[instance.nPath * (instance.nVert - 2)];
+        int k = 0;
         for (int i = 0; i < instance.nPath; i++) {
-            for(int j = 0; j < instance.nVert; j++) {
-                routeNodeProfit[i][j] = makeIntVar(solver, instance.maxProfit);
-                solver.post(new MulCte(routes[i].getNodeVar(j).isRequired(), instance.profit[j], routeNodeProfit[i][j]));
+            for (int j = 1; j < instance.nVert - 1; j++) {
+                nodeProfit[k++] = mul(routes[i].getNodeVar(j).isRequired(), instance.profit[j]);
             }
         }
+        solver.post(new Sum(nodeProfit, totalProfit));
 
-        System.out.println(Arrays.deepToString(routeNodeProfit));
-        for(int i = 0; i < instance.nPath; i++) {
-            perRouteProfit[i] = makeIntVar(solver, instance.maxProfit);
-            solver.post(new Sum(routeNodeProfit[i], perRouteProfit[i]));
-        }
-        solver.post(new Sum(perRouteProfit, totalProfit));
+        CPIntVar totalDistance = sum(distance);
+        //int m = Math.multiplyExact(instance.nPath, instance.maxTime) + 1;
+        //Math.multiplyExact(instance.maxProfit, m); // throws if the objective overflows: lower the scaling
+        //CPIntVar objective = sum(mul(totalProfit, m), minus(totalDistance));
+        CPIntVar objective = totalProfit;
 
         // ===================== Search =====================
-
         DFSearch search = makeDfs(solver, firstFailBinary(routes));
 
         int[][] bestRoutes = new int[instance.nPath][instance.nVert];
@@ -104,10 +114,11 @@ public class TOPSeqVar {
             for (int i = 0; i < instance.nPath; i++)
                 bestLength[i] = routes[i].fillNode(bestRoutes[i], MEMBER_ORDERED);
             bestProfit[0] = totalProfit.min();
-            System.out.println("yeaaah: " + Arrays.toString(routes) + " with total profit: " + totalProfit);
+            System.out.println("Solution found: with total profit: " + totalProfit + " and total distance: " + totalDistance);
         });
 
-        Objective objectiveFunction = solver.maximize(totalProfit);
+        System.out.println("--- Running solver ---");
+        Objective objectiveFunction = solver.maximize(objective);
         search.optimize(objectiveFunction, s -> s.numberOfSolutions() >= 1);
 
         // ===================== LNS =====================
@@ -116,9 +127,16 @@ public class TOPSeqVar {
         long start = System.currentTimeMillis();
         long end = start + LNS_RUNNING_TIME;
 
+        int nCustomers = instance.nVert - 2;
+        int nIter = 0;
+        int nCompleted = 0;
         while (System.currentTimeMillis() < end) {
-            int nCustomerDestroyed = random.nextInt(MIN_CUSTOMER_DESTROYED, MAX_CUSTOMER_DESTROYED+1);
-            int nSequenceCustomerDestroyed = random.nextInt(MIN_SEQ_CUSTOMER_DESTROYED, MAX_SEQ_CUSTOMER_DESTROYED+1);
+            int nCustomerDestroyed = random.nextInt(
+                    Math.max(1, nCustomers * MIN_CUSTOMER_DESTROYED / 100),
+                    Math.max(1, nCustomers * MAX_CUSTOMER_DESTROYED / 100) + 1);
+            int nSequenceCustomerDestroyed = random.nextInt(
+                    Math.max(1, nCustomers * MIN_SEQ_CUSTOMER_DESTROYED / 100),
+                    Math.max(1, nCustomers * MAX_SEQ_CUSTOMER_DESTROYED / 100) + 1);
 
             int destroyId = random.nextInt(DESTROYS.length);
             Destroy destroy = DESTROYS[destroyId];
@@ -138,7 +156,7 @@ public class TOPSeqVar {
                         worstCostEfficiencySequenceDestroy(instance, bestRoutes, bestLength, nCustomerDestroyed, nSequenceCustomerDestroyed, random);
             };
 
-            search.optimizeSubjectTo(objectiveFunction, s -> s.numberOfFailures() >= 4000, () -> {
+            SearchStatistics stats = search.optimizeSubjectTo(objectiveFunction, s -> s.numberOfFailures() >= 3_000, () -> {
                 // keep the non-relaxed customers in their route and order
                 for (int i = 0; i < instance.nPath; i++) {
                     int current = bestRoutes[i][0];
@@ -151,13 +169,22 @@ public class TOPSeqVar {
                     }
                 }
             });
+            nIter++;
+            if (stats.isCompleted())
+                nCompleted++;
         }
 
-        System.out.println("best profit: " + bestProfit[0]);
+        System.out.printf("LNS: %d neighborhoods, %d fully explored%n", nIter, nCompleted);
+
+        // ===================== Optimal search =====================
+        long proofEnd = System.currentTimeMillis() + PROOF_RUNNING_TIME;
+        SearchStatistics proof = search.optimize(objectiveFunction, s -> System.currentTimeMillis() >= proofEnd);
+        String result = bestProfit[0] + (proof.isCompleted() ? " (optimal)" : " (not proven)");
+        System.out.println("best profit: " + result);
+        return result;
     }
 
     // ===================== Destroy operators =====================
-
     public enum Destroy {
         WORST_COST_SEQUENCE,
         WORST_PROFIT_SEQUENCE,

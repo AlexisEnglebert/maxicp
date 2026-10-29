@@ -40,6 +40,26 @@ public class DistanceMatrix {
         }
     }
 
+    /**
+     * Enforces the triangular inequality on the given distance
+     * matrix using the Floyd-Warshall algorithm, in O(n^3).
+     * Faster than {@link #enforceTriangularInequality(int[][])} on large matrices.
+     * @param distance a distance matrix without negative cycle
+     */
+    public static void enforceTriangularInequalityFloydWarshall(int[][] distance) {
+        int n = distance.length;
+        for (int k = 0; k < n; k++) {
+            for (int i = 0; i < n; i++) {
+                for (int j = 0; j < n; j++) {
+                    long viaK = (long) distance[i][k] + distance[k][j];
+                    if (viaK < distance[i][j]) {
+                        distance[i][j] = (int) viaK;
+                    }
+                }
+            }
+        }
+    }
+
     private static void bellmanFord(int numNodes, int edgeCount, int[][] edges, int src, long[] dist) throws Exception {
         // Initially distance from source to all other vertices
         // is not known(Infinite).
@@ -64,7 +84,6 @@ public class DistanceMatrix {
             }
         }
     }
-
 
 
     /**

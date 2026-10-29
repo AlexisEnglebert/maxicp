@@ -2,12 +2,13 @@ package org.maxicp.cp.examples.utils;
 
 import org.maxicp.modeling.SeqVar;
 import org.maxicp.modeling.algebra.sequence.SeqStatus;
-import org.maxicp.util.algo.DistanceMatrix;
 import org.maxicp.util.io.InputReader;
 import java.util.Arrays;
-import java.util.List;
+import java.util.Objects;
+
 
 import static org.maxicp.util.algo.DistanceMatrix.enforceTriangularInequality;
+import static org.maxicp.util.algo.DistanceMatrix.enforceTriangularInequalityFloydWarshall;
 
 public class TOPInstance {
 
@@ -21,13 +22,13 @@ public class TOPInstance {
     public int[] xCoord;
     public int[] yCoord;
 
-    public int maxTotalDistances;
-    public int maxProfit;
+    public int maxTotalDistances = 0;
+    public int maxProfit = 0;
 
-    public TOPInstance(String path, int scaling) {
-        InputReader reader = new InputReader(path);
-        this.scaling = scaling;
+    private double[] x;
+    private double[] y;
 
+    void parseKULFormat(InputReader reader) {
         reader.getString();
         nVert = reader.getInt();
 
@@ -37,31 +38,46 @@ public class TOPInstance {
         reader.getString();
         maxTime = (int)(reader.getDouble() * this.scaling);
 
-        maxTotalDistances = 0;
-        maxProfit = 0;
+        x = new double[nVert];
+        y = new double[nVert];
+
+        profit = new int[nVert];
+
+        for(int i = 0; i < nVert; i++) {
+            x[i] = reader.getDouble();
+            y[i] = reader.getDouble();
+            profit[i] = reader.getInt();
+        }
+    }
+
+    public TOPInstance(String path, TopFormat format, int scaling) {
+        InputReader reader = new InputReader(path);
+        this.scaling = scaling;
+
+        if (Objects.requireNonNull(format) == TopFormat.KUL) {
+            parseKULFormat(reader);
+        }
 
         xCoord = new int[nVert];
         yCoord = new int[nVert];
 
-        profit = new int[nVert];
-        distanceMatrix = new int[nVert][nVert];
-
-        // Assume that reader.getDouble() * this.scaling will not overflow.
-        for(int i = 0; i < nVert; i++) {
-            xCoord[i] = (int)(reader.getDouble() * this.scaling);
-            yCoord[i] = (int)(reader.getDouble() * this.scaling);
-            profit[i] = reader.getInt() * this.scaling;
+        for (int i = 0; i < nVert; i++) {
+            xCoord[i] = (int)(x[i] * this.scaling);
+            yCoord[i] = (int)(y[i] * this.scaling);
         }
 
+        distanceMatrix = new int[nVert][nVert];
         for(int i = 0; i < nVert; i++) {
             for(int j = i+1; j < nVert; j++) {
                 int dist = Math.round((float)Math.sqrt(Math.pow(xCoord[i]-xCoord[j], 2) + Math.pow(yCoord[i]-yCoord[j],2)));
+                //int dist = (int)Math.ceil(Math.sqrt(Math.pow(x[i]-x[j], 2) + Math.pow(y[i]-y[j],2)));
                 distanceMatrix[i][j] =  dist;
                 distanceMatrix[j][i] =  dist;
             }
         }
 
-        enforceTriangularInequality(distanceMatrix);
+        //enforceTriangularInequality(distanceMatrix);
+        enforceTriangularInequalityFloydWarshall(distanceMatrix);
 
         for(int i = 0; i < nVert; i++) {
             maxTotalDistances += distanceMatrix[i][0];
