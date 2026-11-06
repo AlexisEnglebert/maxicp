@@ -25,7 +25,7 @@ public class InputReader {
             in = new BufferedReader(new InputStreamReader(istream));
             tokenizer = new StringTokenizer("");
         } catch (Exception e) {
-            throw new RuntimeException();
+            throw new RuntimeException(e.toString());
         }
     }
 

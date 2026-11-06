@@ -32,10 +32,20 @@ public class Distance extends AbstractCPConstraint {
      * @param totalDist the variable representing the total distance of the sequence
      */
     public Distance(CPSeqVar seqVar, int[][] dist, CPIntVar totalDist) {
+        this(seqVar, dist, totalDist, true);
+    }
+
+    /**
+     * @param checkTriangularInequality warns if dist violates the triangular inequality.
+     *                                  The check is in O(n^3): disable it on large instances
+     *                                  whose distances respect it by construction.
+     */
+    public Distance(CPSeqVar seqVar, int[][] dist, CPIntVar totalDist, boolean checkTriangularInequality) {
         super(seqVar.getSolver());
         this.seqVar  = seqVar;
         this.dist = dist;
-        checkTriangularInequality(dist);
+        if (checkTriangularInequality)
+            checkTriangularInequality(dist);
         this.totalDist = totalDist;
         this.nodes = new int[seqVar.nNode()];
         this.inserts = new int[seqVar.nNode()];
