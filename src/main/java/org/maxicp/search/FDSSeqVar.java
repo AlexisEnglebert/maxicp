@@ -73,7 +73,7 @@ import static org.maxicp.search.Searches.branch;
 public class FDSSeqVar implements Supplier<Runnable[]> {
 
     private static final double DEFAULT_ALPHA = 0.95;
-    private static final double DEFAULT_DETOUR_WEIGHT = 0.20;
+    private static final double DEFAULT_DETOUR_WEIGHT = 0.10;
     private static final double DEFAULT_INITIAL_POOL_TAU = 0.75;
 
     private final SeqVar[] seqVars;
@@ -374,7 +374,8 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
 
     /**
      * Disables components for ablation experiments. With {@code slotSplitting = false}, the reduction ratio
-     * {@code R} uses the uniform slot density {@code nInsert(u) / K} (the slot weights are never updated).
+     * {@code R} is the slot-normalized reduction of the first FDSSeqVar (commit eb82eba): uniform slot density
+     * {@code nInsert(u) / K} and {@code choices(u) = nInsert(u)} (the slot weights are never updated).
      * With {@code lazyPool = false}, every feasible insertion is scored instead of the short-detour lazy pool.
      *
      * @return this search, for chaining
@@ -466,9 +467,12 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
                     }
                 }
                 if (wU <= 0.0) continue;
-                destChoices[u] = required ? wU : 1.0 + wU;
                 destRho[u] = wU / totalWeight;
-                if (!slotSplitting) continue; // uniform slot density: all weights stay 1
+                if (!slotSplitting) { // uniform slot density of the first FDSSeqVar: weights stay 1
+                    destChoices[u] = wU;
+                    continue;
+                }
+                destChoices[u] = required ? wU : 1.0 + wU;
                 double p = required ? 1.0 : wU / (1.0 + wU);
                 double factor = 1.0 + p / wU;
                 for (int k = 0; k < nSlotsU; k++) {
