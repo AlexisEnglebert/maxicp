@@ -51,20 +51,19 @@ import static org.maxicp.search.Searches.branch;
  *       ratings by transition {@code (pred, node)} shares learned conflict ratings across symmetrical vehicles
  *       while keeping vehicle-specific depot transitions distinct.</li>
  *   <li><b>Combinatorial Space Contraction via Sequential Slot-Splitting ({@code R}):</b> The exact number of valid
- *       sequence completions of a sequence domain with {@code K} open member intervals (slots) and {@code M}
- *       uninserted nodes is {@code sum_{sigma} prod_{j=1}^K (r_j(sigma))!}, whose exact evaluation is #P-hard in
- *       general. {@code FDSSeqVar} approximates the effective ordered domain size {@code choices(u)} and slot density
- *       {@code rho_seq(u)} of each uninserted node in {@code O(M * K)} polynomial time via a Lukacs Gamma-Dirichlet
- *       sequential slot-splitting pass (which is exact on homogeneous, block-disjoint, and laminar/nested slot domains
- *       and eliminates the interval splitting paradox).</li>
+ *       sequence completions of a sequence domain with {@code K} open member intervals (slots) is
+ *       {@code sum_f prod_{j=1}^K (r_j(f))!}, which is #P-complete to compute in general. {@code FDSSeqVar}
+ *       approximates the number of options {@code choices(u)} and the slot density {@code rho_seq(u)} of each
+ *       uninserted node in {@code O(|U| * K)} time with the Sequential Slot-Splitting Estimator, which is exact on
+ *       laminar domains without possible nodes. The slots of all sequences form a single pool, and a node counts as
+ *       required if it is required in one of the sequences where it is insertable.</li>
  *   <li><b>Predecessor Conflict Blame:</b> When {@code insert(seq, pred, node)} fails, conflict blame is also
  *       propagated to {@code predRating[pred]}, accelerating failure detection on coupled pairs (such as
  *       pickup-and-delivery requests in DARP).</li>
  *   <li><b>Short-Detour Lazy Choice Pool:</b> When a distance matrix or detour cost function
  *       {@code (pred, node, succ) -> cost} is supplied, {@code FDSSeqVar} initially only admits choice points
- *       {@code (pred, node)} with a short detour ({@code <= tau0 * avgEdgeCost}) into the active choice pool
- *       {@code inPool[pred][node]}, lazily expanding the pool for a node only when all of its initial short-detour
- *       insertions have been refuted or pruned.</li>
+ *       {@code (pred, node)} with a short detour ({@code <= tau_pool * avgEdgeCost}), the minimum-detour insertion of
+ *       each node on each sequence, and the transitions already selected for branching ({@code inPool[pred][node]}).</li>
  * </ol>
  *
  * @see FDS
@@ -74,16 +73,17 @@ import static org.maxicp.search.Searches.branch;
 public class FDSSeqVar implements Supplier<Runnable[]> {
 
     private static final double DEFAULT_ALPHA = 0.95;
-    private static final double DEFAULT_DETOUR_WEIGHT = 0.10;
-    private static final double DEFAULT_INITIAL_POOL_TAU = 0.55;
-    private static final double DEFAULT_FALLBACK_BAND = 0.15;
+    private static final double DEFAULT_DETOUR_WEIGHT = 0.20;
+    private static final double DEFAULT_INITIAL_POOL_TAU = 0.75;
 
     private final SeqVar[] seqVars;
     private final ModelProxy model;
     private final double alpha;
     private double detourWeight;
     private final double initialPoolTau;
-    private final double fallbackBand;
+    /** Ablation switches ({@link #ablation}): slot-splitting weight updates and the short-detour lazy pool. */
+    private boolean slotSplitting = true;
+    private boolean lazyPool = true;
     private final boolean autoDiscoverDistMatrix;
     private int[][] distMatrix;
     private final TriFunction<Integer, Integer, Integer, Integer> detourCost;
@@ -114,6 +114,7 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
     private final int[] candSeq;
     private final int[] candPred;
     private final int[] candDetour;
+    private final boolean[] candAdmitted;
     private double avgEdgeCost = 1.0;
 
     /** Cached concrete model and raw CP variables for direct zero-overhead access. */
@@ -205,7 +206,6 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
         this.alpha = alpha;
         this.detourWeight = Math.max(0.0, detourWeight);
         this.initialPoolTau = DEFAULT_INITIAL_POOL_TAU;
-        this.fallbackBand = DEFAULT_FALLBACK_BAND;
         this.autoDiscoverDistMatrix = autoDiscoverDistMatrix;
         this.distMatrix = distMatrix;
         this.detourCost = detourCost;
@@ -242,6 +242,7 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
         this.candSeq = new int[maxPossibleIns];
         this.candPred = new int[maxPossibleIns];
         this.candDetour = new int[maxPossibleIns];
+        this.candAdmitted = new boolean[maxPossibleIns];
 
         if (distMatrix != null) {
             updateAvgEdgeCostFromMatrix(distMatrix);
@@ -260,7 +261,8 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
                 }
             }
             if (cnt > 0) {
-                this.avgEdgeCost = (double) sum / cnt;
+                // detourCost(i, j, i) = d[i][j] + d[j][i]: halve it to get the mean transition distance
+                this.avgEdgeCost = (double) sum / (2.0 * cnt);
             }
         }
 
@@ -370,6 +372,19 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
         }
     }
 
+    /**
+     * Disables components for ablation experiments. With {@code slotSplitting = false}, the reduction ratio
+     * {@code R} uses the uniform slot density {@code nInsert(u) / K} (the slot weights are never updated).
+     * With {@code lazyPool = false}, every feasible insertion is scored instead of the short-detour lazy pool.
+     *
+     * @return this search, for chaining
+     */
+    public FDSSeqVar ablation(boolean slotSplitting, boolean lazyPool) {
+        this.slotSplitting = slotSplitting;
+        this.lazyPool = lazyPool;
+        return this;
+    }
+
     private int currentDepth() {
         return sm == null ? 0 : Math.max(0, sm.getLevel() - baseLevel);
     }
@@ -383,14 +398,15 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
     }
 
     /**
-     * Computes the effective ordered insertion count {@code choices(u)} and sequential slot density
-     * {@code rho_seq(u) = choices(u) / totalWeight(u)} for each uninserted node {@code u} using the
-     * Lukacs Gamma-Dirichlet Sequential Slot-Splitting Estimator in {@code O(M * K)} time.
+     * Computes the number of options {@code choices(u)} and the sequential slot density
+     * {@code rho_seq(u) = W_u / W} of each uninserted node {@code u} with the Sequential Slot-Splitting
+     * Estimator in {@code O(|U| * K)} time.
      * <p>
-     * Unlike naive insertion counts {@code nInsert(u)}, which ignore the {@code r_j!} intra-slot permutations
-     * of nodes sharing a member interval {@code j} and therefore increase when an interval splits, sequential
-     * slot-splitting propagates the expected Gamma shape weight {@code w_j <- w_j * (1 + 1 / choices(u))}
-     * across compatible slots in non-decreasing order of {@code D(u)}.
+     * Nodes are processed by non-decreasing {@code nInsert(u)} (ties by node index). Node {@code u} sees
+     * {@code W_u = sum_{j in J_u} w_j} expected gaps: {@code choices(u) = W_u} if {@code u} is required and
+     * {@code 1 + W_u} if it is possible (it may also be excluded). It is inserted with probability
+     * {@code p_u = 1} (required) or {@code W_u / (1 + W_u)} (possible), so {@code w_j <- w_j * (1 + p_u / W_u)}
+     * for {@code j in J_u} and {@code W <- W + p_u}.
      */
     private void snapshotSequentialSlotSplitting(double[] destRho, double[] destChoices) {
         int nSeq = seqVars.length;
@@ -434,27 +450,31 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
 
         for (int d = 1; d <= maxIns; d++) {
             for (int u = bucketHeads[d]; u != -1; u = bucketNext[u]) {
-                double choices = 0.0;
+                double wU = 0.0;
+                boolean required = false;
                 int nSlotsU = 0;
                 for (int s = 0; s < nSeq; s++) {
                     SeqVar r = seqAt(s);
                     if (u >= r.nNode() || !r.isNode(u, INSERTABLE)) continue;
+                    required |= r.isNode(u, REQUIRED);
                     int nIns = r.fillInsert(u, insertions);
                     int base = s * nTotalNodes;
                     for (int j = 0; j < nIns; j++) {
                         int flatSlot = base + insertions[j];
                         activeSlots[nSlotsU++] = flatSlot;
-                        choices += slotWeights[flatSlot];
+                        wU += slotWeights[flatSlot];
                     }
                 }
-                if (choices <= 0.0) continue;
-                destChoices[u] = choices;
-                destRho[u] = choices / totalWeight;
-                double factor = 1.0 + 1.0 / choices;
+                if (wU <= 0.0) continue;
+                destChoices[u] = required ? wU : 1.0 + wU;
+                destRho[u] = wU / totalWeight;
+                if (!slotSplitting) continue; // uniform slot density: all weights stay 1
+                double p = required ? 1.0 : wU / (1.0 + wU);
+                double factor = 1.0 + p / wU;
                 for (int k = 0; k < nSlotsU; k++) {
                     slotWeights[activeSlots[k]] *= factor;
                 }
-                totalWeight += 1.0;
+                totalWeight += p;
             }
         }
     }
@@ -552,9 +572,9 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
         double bestScore = Double.MAX_VALUE;
         int bestTie = Integer.MAX_VALUE;
         boolean useDetour = hasDetourGuidance();
+        boolean usePool = useDetour && lazyPool;
         double fdsWeight = 1.0 - detourWeight;
         double shortThreshold = initialPoolTau * avgEdgeCost;
-        double bandMargin = fallbackBand * avgEdgeCost;
 
         for (int u = 0; u < nTotalNodes; u++) {
             int totalIns = 0;
@@ -578,14 +598,12 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
             if (anyRequiredUninserted && !isReq) continue;
 
             int nCand = 0;
-            int minDetourU = Integer.MAX_VALUE;
-            boolean hasActiveInPool = false;
-
             for (int s = 0; s < nSeq; s++) {
                 SeqVar r = seqAt(s);
                 if (u >= r.nNode() || !r.isNode(u, INSERTABLE)) continue;
                 if (isReq && !r.isNode(u, REQUIRED)) continue;
                 int nIns = r.fillInsert(u, insertions);
+                int argMin = nCand; // minimum-detour insertion of u on this sequence, always admitted
                 for (int j = 0; j < nIns; j++) {
                     int pred = insertions[j];
                     int succ = r.memberAfter(pred);
@@ -593,33 +611,20 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
                     candSeq[nCand] = s;
                     candPred[nCand] = pred;
                     candDetour[nCand] = detour;
+                    candAdmitted[nCand] = !usePool || inPool[pred][u] || detour <= shortThreshold;
+                    if (detour < candDetour[argMin]) {
+                        argMin = nCand;
+                    }
                     nCand++;
-                    if (detour < minDetourU) {
-                        minDetourU = detour;
-                    }
-                    if (useDetour) {
-                        if (detour <= shortThreshold) {
-                            inPool[pred][u] = true;
-                        }
-                        if (inPool[pred][u]) {
-                            hasActiveInPool = true;
-                        }
-                    }
                 }
-            }
-
-            if (useDetour && !hasActiveInPool) {
-                int cutoff = (int) Math.round(minDetourU + bandMargin);
-                for (int c = 0; c < nCand; c++) {
-                    if (candDetour[c] <= cutoff) {
-                        inPool[candPred[c]][u] = true;
-                    }
+                if (nIns > 0) {
+                    candAdmitted[argMin] = true;
                 }
             }
 
             for (int c = 0; c < nCand; c++) {
+                if (!candAdmitted[c]) continue;
                 int pred = candPred[c];
-                if (useDetour && !inPool[pred][u]) continue;
 
                 int s = candSeq[c];
                 int tie = candDetour[c];
@@ -651,6 +656,7 @@ public class FDSSeqVar implements Supplier<Runnable[]> {
         final int pred = bestPred;
         final int node = bestNode;
         final int succ = seqAt(seqIdx).memberAfter(pred);
+        inPool[pred][node] = true; // a transition selected for branching stays in the pool
         boolean posFirst = useDetour || (ratingPos[pred][node] <= ratingNeg[pred][node]);
         Runnable posBranch = makeBranch(seqIdx, pred, node, succ, true);
         Runnable negBranch = makeBranch(seqIdx, pred, node, succ, false);
